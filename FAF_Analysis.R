@@ -1,3 +1,9 @@
+# data/FAF5.7.1.csv is not tracked in this repo (too large for GitHub).
+# To obtain it:
+#   1. Go to https://www.bts.gov/faf
+#   2. Download the FAF5.7.1 regional database (CSV format)
+#   3. Unzip and place FAF5.7.1.csv in the data/ folder
+
 library(tidyverse)
 library(readxl)
 library(ggthemes)
