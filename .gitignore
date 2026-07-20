@@ -1,0 +1,8 @@
+# R session / workspace files
+.RData
+.RDataTmp
+.Rhistory
+.Rproj.user/
+
+# Large data files (kept locally, not tracked in git)
+data/FAF5.7.1.csv
