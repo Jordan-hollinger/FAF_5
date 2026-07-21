@@ -9,210 +9,274 @@ library(readxl)
 library(ggthemes)
 library(writexl)
 
-faf_5 <- read_csv("data/FAF5.7.1.csv")
 faf_5_regions <- read_csv("data/CFS-area-code-FAF5-zone-id.csv") |> janitor::clean_names()
 faf_5_sctg2 <- read_excel("data/FAF5_metadata.xlsx", sheet = "Commodity (SCTG2)") |> janitor::clean_names()
-faf_5_mode <- read_excel("data/FAF5_metadata.xlsx", sheet = "Mode") |> janitor::clean_names()
+faf_5_mode <- read_excel("data/FAF5_metadata.xlsx", sheet = "Mode") |> janitor::clean_names() |>
+  mutate(numeric_label = as.numeric(numeric_label))
+#zone codes (e.g. "011") are zero-padded strings matching dms_orig/dms_dest - keep numeric_label as character
+faf_5_zones <- bind_rows(
+  read_excel("data/FAF5_metadata.xlsx", sheet = "FAF Zone (Domestic)") |>
+    janitor::clean_names() |>
+    rename(description = short_description) |>
+    select(numeric_label, description),
+  read_excel("data/FAF5_metadata.xlsx", sheet = "FAF Zone (Foreign)") |>
+    janitor::clean_names() |>
+    select(numeric_label, description)
+)
 
 #FAF 5 Boston Region = 251
-#value in millions of dollars (all 2017) - divide by 1000 to get billions
+#value in millions of dollars (constant 2017$) - divide by 1000 to get billions
 #weight in thousand tons
+#annual estimate years: 2017 (base) through 2024
+
+faf_5 <- read_csv("data/FAF5.7.1.csv") |>
+  filter(dms_orig == 251 | dms_dest == 251) |>
+  select(-matches("^(tons|value|current_value)_20(30|35|40|45|50)$")) |>
+  pivot_longer(
+    cols = matches("^(tons|value)_20(1[7-9]|2[0-4])$"),
+    names_to = c(".value", "year"),
+    names_pattern = "(tons|value)_(\\d{4})"
+  ) |>
+  mutate(year = as.integer(year))
 
 ####Totals####
-exports <- faf_5 |> 
-  filter(dms_orig == 251 & dms_dest != 251) |> 
-  summarize(total_export_value = sum(value_2017)/1000)
+exports <- faf_5 |>
+  filter(dms_orig == 251 & dms_dest != 251) |>
+  group_by(year) |>
+  summarize(total_export_value = sum(value)/1000)
 
-imports <- faf_5 |> 
-  filter(dms_dest == 251 & dms_orig != 251) |> 
-  summarize(total_import_value = sum(value_2017)/1000)
+imports <- faf_5 |>
+  filter(dms_dest == 251 & dms_orig != 251) |>
+  group_by(year) |>
+  summarize(total_import_value = sum(value)/1000)
 
-intra_flows <- faf_5 |> 
-  filter(dms_dest == 251 & dms_orig == 251) |> 
-  summarize(total_import_value = sum(value_2017)/1000)
+intra_flows <- faf_5 |>
+  filter(dms_dest == 251 & dms_orig == 251) |>
+  group_by(year) |>
+  summarize(total_intra_value = sum(value)/1000)
 
-exports + imports + intra_flows
+exports |>
+  left_join(imports, by = "year") |>
+  left_join(intra_flows, by = "year") |>
+  mutate(total_value = total_export_value + total_import_value + total_intra_value)
 
 #total non foreign originating intra region flows
-faf_5 |> filter(dms_orig == 251 & dms_dest == 251 & is.na(fr_orig) & is.na(fr_dest)) |> 
-  summarise(total_value = sum(value_2017)/1000)
+faf_5 |> filter(dms_orig == 251 & dms_dest == 251 & is.na(fr_orig) & is.na(fr_dest)) |>
+  group_by(year) |>
+  summarise(total_value = sum(value)/1000)
 
 ####Top Ten Export Locations####
-top_10_dest <- faf_5 |> 
-  filter(dms_orig == 251) |> 
-  group_by(dms_dest) |> 
-  summarize(total_value = sum(value_2017)) |> 
-  arrange(desc(total_value)) |> 
-  select(dms_dest) |> 
-  slice(1:10)
+top_10_dest <- faf_5 |>
+  filter(dms_orig == 251) |>
+  group_by(dms_dest) |>
+  summarize(total_value = sum(value)) |>
+  arrange(desc(total_value)) |>
+  slice(1:10) |>
+  pull(dms_dest)
 
-
-faf_5 |> filter(dms_orig == 251 & dms_dest %in% top_10_dest$dms_dest) |> 
-  group_by(dms_dest) |> 
-  summarize(value_2017 = sum(value_2017)) |> 
-  ggplot(aes(x = reorder(dms_dest, -value_2017), value_2017))+
-  geom_col()
+faf_5 |>
+  filter(dms_orig == 251 & dms_dest %in% top_10_dest) |>
+  group_by(dms_dest, year) |>
+  summarize(total_value = sum(value)/1000) |>
+  left_join(faf_5_zones, join_by(dms_dest == numeric_label)) |>
+  ggplot(aes(x = year, y = total_value, color = description)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  xlab("Year") +
+  ylab("Total Export Value ($Billions)") +
+  labs(color = "Destination")
 
 ####Top Ten Export Products####
 
 faf_5 <- faf_5 |> mutate(intra_region = ifelse(dms_orig == 251 & dms_dest == 251, "intra", "not_intra"))
 
-#Includes exports to other states/zones and intr-azone shipments
-top_ten_exports_value <- faf_5 |> 
+#Includes exports to other states/zones and intra-zone shipments
+#rank products by total value summed across all years (2017-2024)
+top_10_val_sctg2 <- faf_5 |>
   filter(dms_orig == 251) |>
-  group_by(sctg2) |> 
-  summarize(
-    total_value = sum(value_2017)/1000,
-  ) |> 
-  arrange(desc(total_value)) |> 
-  left_join(faf_5_sctg2, join_by(sctg2 == numeric_label)) |> 
-  slice(1:10)
+  group_by(sctg2) |>
+  summarize(total_value = sum(value)/1000) |>
+  arrange(desc(total_value)) |>
+  slice(1:10) |>
+  pull(sctg2)
+
+top_ten_exports_value <- faf_5 |>
+  filter(dms_orig == 251 & sctg2 %in% top_10_val_sctg2) |>
+  group_by(sctg2, year) |>
+  summarize(total_value = sum(value)/1000) |>
+  left_join(faf_5_sctg2, join_by(sctg2 == numeric_label)) |>
+  arrange(desc(total_value), year)
 
 write_xlsx(top_ten_exports_value, "data/top_ten_exp_val.xlsx")
 
-top_ten_exports_wt <- faf_5 |> 
+top_10_wt_sctg2 <- faf_5 |>
   filter(dms_orig == 251) |>
-  group_by(sctg2) |> 
-  summarize(total_weight = sum(tons_2017)) |> 
-  arrange(desc(total_weight)) |> 
-  left_join(faf_5_sctg2, join_by(sctg2 == numeric_label)) |> 
-  slice(1:10)
+  group_by(sctg2) |>
+  summarize(total_weight = sum(tons)) |>
+  arrange(desc(total_weight)) |>
+  slice(1:10) |>
+  pull(sctg2)
 
-top_ten_wt <- top_ten_exports_wt$description
+top_ten_exports_wt <- faf_5 |>
+  filter(dms_orig == 251 & sctg2 %in% top_10_wt_sctg2) |>
+  group_by(sctg2, year) |>
+  summarize(total_weight = sum(tons)) |>
+  left_join(faf_5_sctg2, join_by(sctg2 == numeric_label)) |>
+  arrange(desc(total_weight), year)
 
-#top exports by weight and whether internal or external shipments 
-top_ten_exports_wt_intra <- faf_5 |> 
-  filter(dms_orig == 251) |>
-  group_by(sctg2, intra_region) |> 
-  summarize(total_weight = sum(tons_2017)) |> 
-  left_join(faf_5_sctg2, join_by(sctg2 == numeric_label)) |> 
-  filter(description %in% top_ten_wt) |> 
-  pivot_wider(names_from = intra_region, values_from = total_weight) |> 
-  mutate(total_weight = intra + not_intra) |> 
-  arrange(desc(total_weight)) 
+#top exports by weight and whether internal or external shipments
+top_ten_exports_wt_intra_long <- faf_5 |>
+  filter(dms_orig == 251 & sctg2 %in% top_10_wt_sctg2) |>
+  group_by(sctg2, year, intra_region) |>
+  summarize(total_weight = sum(tons)) |>
+  left_join(faf_5_sctg2, join_by(sctg2 == numeric_label)) |>
+  ungroup()
+
+top_ten_exports_wt_intra <- top_ten_exports_wt_intra_long |>
+  pivot_wider(names_from = intra_region, values_from = total_weight, values_fill = 0) |>
+  mutate(total_weight = intra + not_intra) |>
+  arrange(desc(total_weight), year)
 
 write_xlsx(top_ten_exports_wt_intra, "data/top_ten_exp_wt_intra.xlsx")
 
-#top exports by value and whether internal or external shipments 
-top_ten_exports_val_intra <- faf_5 |> 
-  filter(dms_orig == 251) |>
-  group_by(sctg2, intra_region) |> 
-  summarize(total_value = sum(value_2017)/1000) |> 
-  left_join(faf_5_sctg2, join_by(sctg2 == numeric_label)) |> 
-  ungroup() |> 
-  pivot_wider(names_from = intra_region, values_from = total_value) |> 
-  mutate(total_value = intra + not_intra) |> 
-  arrange(desc(total_value)) |> 
-  slice(1:10)
+#top exports by value and whether internal or external shipments
+top_ten_exports_val_intra <- faf_5 |>
+  filter(dms_orig == 251 & sctg2 %in% top_10_val_sctg2) |>
+  group_by(sctg2, year, intra_region) |>
+  summarize(total_value = sum(value)/1000) |>
+  left_join(faf_5_sctg2, join_by(sctg2 == numeric_label)) |>
+  ungroup() |>
+  pivot_wider(names_from = intra_region, values_from = total_value, values_fill = 0) |>
+  mutate(total_value = intra + not_intra) |>
+  arrange(desc(total_value), year)
 
 write_xlsx(top_ten_exports_val_intra, "data/top_ten_exp_val_intra.xlsx")
 
 
-#top_ten_exports_fig <- 
-top_ten_exports |> ggplot(aes(x = reorder(description, -total_value), total_value))+
-  geom_col(fill = "skyblue4")+
-  xlab("Standard Classification of Transported Goods (SCTG)")+
-  ylab("Total Value ($Billions)")+
-  theme(axis.text.x = element_text(angle = 50, hjust = 1, vjust = 1, size = 12),
-        axis.text.y = element_blank())+
-  geom_text(aes(label = round(total_value, digits = 1)), vjust = 2, color = "white")
+top_ten_exports_value |>
+  ggplot(aes(x = year, y = total_value, color = description)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  xlab("Year") +
+  ylab("Total Export Value ($Billions)") +
+  labs(color = "Product")
 
-top_ten_exports |> ggplot(aes(x = reorder(description, -total_weight), total_weight))+
-  geom_col(fill = "skyblue4")+
-  xlab("Standard Classification of Transported Goods (SCTG)")+
-  ylab("Total Value ($Billions)")+
-  theme(axis.text.x = element_text(angle = 50, hjust = 1, vjust = 1, size = 12),
-        axis.text.y = element_blank())+
-  geom_text(aes(label = round(total_weight, digits = 1)), vjust = 2, color = "white")
+top_ten_exports_wt |>
+  ggplot(aes(x = year, y = total_weight, color = description)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  xlab("Year") +
+  ylab("Total Export Weight (Thousand Tons)") +
+  labs(color = "Product")
 
-#ggsave("top_ten_exp.png", plot = top_ten_exports_fig, dpi = 300)
+top_ten_exports_wt_intra_long |>
+  ggplot(aes(x = year, y = total_weight, fill = intra_region)) +
+  geom_col() +
+  facet_wrap(~description) +
+  xlab("Year") +
+  ylab("Total Weight (Thousand Tons)") +
+  labs(fill = "Flow Type")
 
-ggplot(top_ten_exports_wt_intra, aes(x = description, y = total_weight, fill = intra_region))+
-  geom_col()
+#weight by mode
+faf_5 |>
+  filter(dms_orig == 251) |>
+  group_by(dms_mode, year, intra_region) |>
+  summarize(total_weight = sum(tons)) |>
+  pivot_wider(names_from = intra_region, values_from = total_weight, values_fill = 0) |>
+  mutate(total_weight = intra + not_intra) |>
+  left_join(faf_5_mode, join_by(dms_mode == numeric_label)) |>
+  select(description, year, intra, not_intra, total_weight) |>
+  arrange(desc(total_weight), year) |>
+  write_xlsx("data/mode_wt.xlsx")
 
-#weight
-faf_5 |> 
-  filter(dms_orig == 251) |> 
-  group_by(dms_mode, intra_region) |> 
-  summarize(
-    total_weight = sum(tons_2017)
-  ) |> 
-  pivot_wider(names_from = intra_region, values_from = total_weight) |> 
-  mutate(
-    intra = ifelse(is.na(intra), 0, intra),
-    not_intra = ifelse(is.na(not_intra), 0, not_intra),
-    total_weight = intra + not_intra
-  ) |> 
-  left_join(faf_5_modes, join_by(dms_mode == numeric_label)) |> 
-  select(description, intra, not_intra, total_weight)
-write_xlsx("data/mode_wt.xlsx")
-
-#value  
-faf_5 |> 
-  filter(dms_orig == 251) |> 
-  group_by(dms_mode, intra_region) |> 
-  summarize(
-    total_value = sum(value_2017)/1000
-  ) |> 
-  pivot_wider(names_from = intra_region, values_from = total_value) |> 
-  mutate(
-    intra = ifelse(is.na(intra), 0, intra),
-    not_intra = ifelse(is.na(not_intra), 0, not_intra),
-    total_value = intra + not_intra
-  ) |> 
-  left_join(faf_5_modes, join_by(dms_mode == numeric_label)) |> 
-  select(description, intra, not_intra, total_value) |> 
-  arrange(desc(total_value)) |> 
+#value by mode
+faf_5 |>
+  filter(dms_orig == 251) |>
+  group_by(dms_mode, year, intra_region) |>
+  summarize(total_value = sum(value)/1000) |>
+  pivot_wider(names_from = intra_region, values_from = total_value, values_fill = 0) |>
+  mutate(total_value = intra + not_intra) |>
+  left_join(faf_5_mode, join_by(dms_mode == numeric_label)) |>
+  select(description, year, intra, not_intra, total_value) |>
+  arrange(desc(total_value), year) |>
   write_xlsx("data/mode_val.xlsx")
 
-faf_5 |> 
-  filter(dms_orig == 251) |> 
-  group_by(dms_mode, intra_region) |> 
-  summarize(
-    total_value = sum(value_2017)/1000
-  ) |> 
-  pivot_wider(names_from = intra_region, values_from = total_value) |> 
-  mutate(
-    intra = ifelse(is.na(intra), 0, intra),
-    not_intra = ifelse(is.na(not_intra), 0, not_intra),
-    total_value = intra + not_intra
-  ) |> 
-  left_join(faf_5_modes, join_by(dms_mode == numeric_label)) |> 
-  select(description, intra, not_intra, total_value) |> 
-  arrange(desc(total_value)) |>
-  ungroup() |> 
-  summarise(total_value/sum(total_value))
+#value share by mode, computed within each year
+faf_5 |>
+  filter(dms_orig == 251) |>
+  group_by(dms_mode, year, intra_region) |>
+  summarize(total_value = sum(value)/1000) |>
+  pivot_wider(names_from = intra_region, values_from = total_value, values_fill = 0) |>
+  mutate(total_value = intra + not_intra) |>
+  left_join(faf_5_mode, join_by(dms_mode == numeric_label)) |>
+  select(description, year, total_value) |>
+  group_by(year) |>
+  mutate(share_of_value = total_value/sum(total_value)) |>
+  arrange(year, desc(share_of_value)) |>
+  ungroup()
 
 
 
 ####Imports####
 #does not include the intra-zone movement of goods. This is exclusively imports from elsewhere.
 
-faf_5 |> filter(dms_dest == 251 & dms_orig != 251) |> 
-  summarise(total_value = sum(value_2017)/1000)
+faf_5 |> filter(dms_dest == 251 & dms_orig != 251) |>
+  group_by(year) |>
+  summarise(total_value = sum(value)/1000)
 
-faf_5 |> 
+top_10_imp_val_sctg2 <- faf_5 |>
   filter(dms_dest == 251 & dms_orig != 251) |>
-  group_by(sctg2) |> 
-  summarize(total_value = sum(value_2017)/1000) |> 
-  left_join(faf_5_sctg2, join_by(sctg2 == numeric_label)) |> 
-  ungroup() |> 
-  arrange(desc(total_value)) |> 
-  slice(1:10) |> 
-  write_xlsx("data/top_ten_imp_val.xlsx")
+  group_by(sctg2) |>
+  summarize(total_value = sum(value)/1000) |>
+  arrange(desc(total_value)) |>
+  slice(1:10) |>
+  pull(sctg2)
 
-faf_5 |> filter(dms_dest == 251 & dms_orig != 251) |> 
-  summarise(total_value = sum(tons_2017))
+top_ten_imports_value <- faf_5 |>
+  filter(dms_dest == 251 & dms_orig != 251 & sctg2 %in% top_10_imp_val_sctg2) |>
+  group_by(sctg2, year) |>
+  summarize(total_value = sum(value)/1000) |>
+  left_join(faf_5_sctg2, join_by(sctg2 == numeric_label)) |>
+  arrange(desc(total_value), year)
 
-faf_5 |> 
+write_xlsx(top_ten_imports_value, "data/top_ten_imp_val.xlsx")
+
+faf_5 |> filter(dms_dest == 251 & dms_orig != 251) |>
+  group_by(year) |>
+  summarise(total_weight = sum(tons))
+
+top_10_imp_wt_sctg2 <- faf_5 |>
   filter(dms_dest == 251 & dms_orig != 251) |>
-  group_by(sctg2) |> 
-  summarize(total_weight = sum(tons_2017)) |> 
-  left_join(faf_5_sctg2, join_by(sctg2 == numeric_label)) |> 
-  ungroup() |> 
-  arrange(desc(total_weight)) |> 
-  slice(1:10) |> 
-  write_xlsx("data/top_ten_imp_wt.xlsx")
+  group_by(sctg2) |>
+  summarize(total_weight = sum(tons)) |>
+  arrange(desc(total_weight)) |>
+  slice(1:10) |>
+  pull(sctg2)
+
+top_ten_imports_wt <- faf_5 |>
+  filter(dms_dest == 251 & dms_orig != 251 & sctg2 %in% top_10_imp_wt_sctg2) |>
+  group_by(sctg2, year) |>
+  summarize(total_weight = sum(tons)) |>
+  left_join(faf_5_sctg2, join_by(sctg2 == numeric_label)) |>
+  arrange(desc(total_weight), year)
+
+write_xlsx(top_ten_imports_wt, "data/top_ten_imp_wt.xlsx")
+
+top_ten_imports_value |>
+  ggplot(aes(x = year, y = total_value, color = description)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  xlab("Year") +
+  ylab("Total Import Value ($Billions)") +
+  labs(color = "Product")
+
+top_ten_imports_wt |>
+  ggplot(aes(x = year, y = total_weight, color = description)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  xlab("Year") +
+  ylab("Total Import Weight (Thousand Tons)") +
+  labs(color = "Product")
 
 
 
