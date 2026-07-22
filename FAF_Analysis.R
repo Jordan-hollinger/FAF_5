@@ -68,7 +68,7 @@ intra_flows <- faf_5 |>
     total_intra_value_current = sum(current_value)/1000
   )
 
-exports |>
+totals <- exports |>
   left_join(imports, by = "year") |>
   left_join(intra_flows, by = "year") |>
   mutate(
@@ -93,6 +93,26 @@ top_10_dest <- faf_5 |>
   slice(1:10) |>
   pull(dms_dest)
 
+#destinations in descending rank order, used to fix both the legend order
+#and the color assignment so they match across the 2017$ and current$ charts
+top_10_dest_names <- faf_5_zones$description[match(top_10_dest, faf_5_zones$numeric_label)]
+
+#muted earth-tone palette, spread across lightness (not just hue) so the
+#10 destinations stay distinguishable under red-green color vision deficiency
+earth_tone_palette_10 <- c(
+  "#001219", "#005f73", "#0a9396", "#94d2bd", "#e9d8a6",
+  "#ee9b00", "#ca6702", "#bb3e03", "#ae2012", "#9b2226"
+)
+names(earth_tone_palette_10) <- top_10_dest_names
+
+earth_tone_theme <- theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey90")
+  )
+
 top_10_dest_values <- faf_5 |>
   filter(dms_orig == 251 & dms_dest %in% top_10_dest) |>
   group_by(dms_dest, year) |>
@@ -100,23 +120,63 @@ top_10_dest_values <- faf_5 |>
     total_value_2017_dollars = sum(value_2017_dollars)/1000,
     total_value_current = sum(current_value)/1000
   ) |>
-  left_join(faf_5_zones, join_by(dms_dest == numeric_label))
+  left_join(faf_5_zones, join_by(dms_dest == numeric_label)) |>
+  mutate(description = factor(description, levels = top_10_dest_names))
 
 top_10_dest_values |>
   ggplot(aes(x = year, y = total_value_2017_dollars, color = description)) +
   geom_line(linewidth = 1) +
   geom_point(size = 1.5) +
+  geom_text(
+    data = filter(top_10_dest_values, year == 2017 & dms_dest %in% c("251","331","363","230","061")),
+    aes(label = round(total_value_2017_dollars, 1)),
+    hjust = 1.25, size = 3, show.legend = FALSE
+  ) +
+  geom_text(
+    data = filter(top_10_dest_values, year == 2024 & dms_dest %in% c("251","331","363","230","061")),
+    aes(label = round(total_value_2017_dollars, 1)),
+    hjust = -0.25, size = 3, show.legend = FALSE
+  ) +
+  scale_color_manual(values = earth_tone_palette_10) +
+  scale_x_continuous(breaks = 2017:2024, expand = expansion(mult = 0.1)) +
   xlab("Year") +
-  ylab("Total Export Value, 2017$ (Billions)") +
-  labs(color = "Destination")
+  ylab("Total Export/Intra-Zone Value, 2017$ (Billions)") +
+  labs(color = "Destination") +
+  earth_tone_theme
+
+ggsave(filename = "top_10_dest.png")
 
 top_10_dest_values |>
   ggplot(aes(x = year, y = total_value_current, color = description)) +
   geom_line(linewidth = 1) +
   geom_point(size = 1.5) +
+  geom_text(
+    data = filter(top_10_dest_values, year == 2017),
+    aes(label = round(total_value_current, 1)),
+    hjust = 1.25, size = 3, show.legend = FALSE
+  ) +
+  geom_text(
+    data = filter(top_10_dest_values, year == 2024),
+    aes(label = round(total_value_current, 1)),
+    hjust = -0.25, size = 3, show.legend = FALSE
+  ) +
+  scale_color_manual(values = earth_tone_palette_10) +
+  scale_x_continuous(breaks = 2017:2024, expand = expansion(mult = 0.1)) +
   xlab("Year") +
   ylab("Total Export Value, Current $ (Billions)") +
-  labs(color = "Destination")
+  labs(color = "Destination") +
+  earth_tone_theme
+
+
+top_10_dest_values |>
+  ggplot(aes(x = description, y = total_value_current, fill = factor(year))) +
+  geom_col(position = "dodge2")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))+
+  ylab("Total Export Value, Current $ (Billions)") +
+  labs(fill = "Year")+
+  theme_minimal()
+
+
 
 ####Top Ten Export Products####
 
